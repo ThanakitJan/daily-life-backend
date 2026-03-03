@@ -8,6 +8,9 @@ const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { v4: uuidv4 } = require("uuid");
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
@@ -16,8 +19,11 @@ app.use(express.urlencoded({ extended: true }));
 
 // ================= MULTER =================
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 } // 20MB
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, path.join(os.tmpdir(), 'uploads')),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g,'_')}`)
+  }),
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
 });
 
 const SALT_ROUNDS = 10;
@@ -123,20 +129,22 @@ function verifyToken(req, res, next) {
 // ================= S3 UPLOAD HELPER =================
 const uploadToS3 = async (file, folder) => {
   const allowed = ['image/jpeg', 'image/png', 'image/webp'];
-  if (!allowed.includes(file.mimetype)) {
-    throw new Error('Invalid file type');
-  }
+  if (!allowed.includes(file.mimetype)) throw new Error('Invalid file type');
 
-  const key = `${folder}/${Date.now()}-${uuidv4()}-${file.originalname.replace(/\s+/g, '_')}`;
+  const key = `${folder}/${Date.now()}-${uuidv4()}-${path.basename(file.path)}`;
+  const fileStream = fs.createReadStream(file.path);
 
   const command = new PutObjectCommand({
     Bucket: process.env.AWS_S3_BUCKET_NAME,
     Key: key,
-    Body: file.buffer,
+    Body: fileStream,
     ContentType: file.mimetype
   });
 
   await s3.send(command);
+
+  // ลบไฟล์ชั่วคราว
+  fs.unlink(file.path, () => {});
 
   return `https://${process.env.AWS_S3_BUCKET_NAME}.s3.amazonaws.com/${key}`;
 };
