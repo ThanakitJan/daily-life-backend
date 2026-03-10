@@ -1407,9 +1407,9 @@ app.post(
   "/createport",
   verifyToken,
   upload.fields([
-    { name: 'profile', maxCount: 1 },
-    { name: 'transcript', maxCount: 1 },
-    { name: 'certificate', maxCount: 20 }
+    { name: "profile", maxCount: 1 },
+    { name: "transcript", maxCount: 1 },
+    { name: "certificate", maxCount: 20 }
   ]),
   async (req, res) => {
 
@@ -1418,9 +1418,9 @@ app.post(
     try {
       await connection.beginTransaction();
 
-      // Parse JSON
       let parsedBody = req.body;
-      if (typeof req.body.data === 'string') {
+
+      if (typeof req.body.data === "string") {
         parsedBody = JSON.parse(req.body.data);
       }
 
@@ -1435,30 +1435,34 @@ app.post(
       } = parsedBody;
 
       if (!user_id || !port_id) {
-        return res.status(400).json({ success: false, message: "user_id และ port_id จำเป็นต้องมี" });
+        return res.status(400).json({
+          success: false,
+          message: "user_id และ port_id จำเป็นต้องมี"
+        });
       }
 
       // ================= Upload Files =================
 
       let profileUrl = null;
       if (req.files?.profile?.[0]) {
-        profileUrl = await uploadToS3(req.files.profile[0], 'profile-port');
+        profileUrl = await uploadToS3(req.files.profile[0], "profile-port");
       }
 
       let transcriptUrl = null;
       if (req.files?.transcript?.[0]) {
-        transcriptUrl = await uploadToS3(req.files.transcript[0], 'Transcript');
+        transcriptUrl = await uploadToS3(req.files.transcript[0], "transcript");
       }
 
       let certificateUrls = [];
+
       if (req.files?.certificate?.length) {
         for (const file of req.files.certificate) {
-          const url = await uploadToS3(file, 'certificates');
+          const url = await uploadToS3(file, "certificates");
           certificateUrls.push(url);
         }
       }
 
-      // ================= Insert portfolios =================
+      // ================= portfolios =================
 
       await connection.query(
         `INSERT INTO portfolios (user_id, port_id, profile_url)
@@ -1522,9 +1526,10 @@ app.post(
         }
       }
 
-      // ================= skills_abilities =================
+      // ================= skills =================
 
       if (skills_abilities) {
+
         const [skillRes] = await connection.query(
           `INSERT INTO skills_abilities (port_id, details)
            VALUES (?, ?)`,
@@ -1534,7 +1539,9 @@ app.post(
         const skillsId = skillRes.insertId;
 
         if (Array.isArray(skills_abilities.language_skills)) {
+
           for (const lang of skills_abilities.language_skills) {
+
             await connection.query(
               `INSERT INTO language_skills
                (port_id, skills_abilities_id, language, listening, speaking, reading, writing)
@@ -1550,13 +1557,17 @@ app.post(
               ]
             );
           }
+
         }
+
       }
 
-      // ================= activities_certificates (JSON) =================
+      // ================= activities =================
 
       if (Array.isArray(activities_certificates)) {
+
         for (const activity of activities_certificates) {
+
           await connection.query(
             `INSERT INTO activities_certificates
              (port_id, number, name_project, date, photo, details)
@@ -1570,13 +1581,17 @@ app.post(
               activity.details || null
             ]
           );
+
         }
+
       }
 
-      // ================= university_choice =================
+      // ================= university =================
 
       if (Array.isArray(university_choice)) {
+
         for (const uni of university_choice) {
+
           await connection.query(
             `INSERT INTO university_choice
              (port_id, university, faculty, major, details)
@@ -1589,7 +1604,9 @@ app.post(
               uni.details || null
             ]
           );
+
         }
+
       }
 
       await connection.commit();
@@ -1605,12 +1622,22 @@ app.post(
       });
 
     } catch (err) {
+
       await connection.rollback();
+
       console.error("Create Portfolio Error:", err);
-      return res.status(500).json({ success: false, error: err.message });
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+
     } finally {
+
       connection.release();
+
     }
+
   }
 );
 
