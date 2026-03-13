@@ -8,10 +8,6 @@ const multer = require("multer");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { v4: uuidv4 } = require("uuid");
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
-
 
 const app = express();
 app.use(cors());
@@ -20,20 +16,9 @@ app.use(express.urlencoded({ extended: true }));
 
 // ================= MULTER =================
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      cb(null, uploadDir);
-    },
-    filename: (req, file, cb) => {
-      const safeName = file.originalname.replace(/\s+/g, "_");
-      cb(null, `${Date.now()}-${safeName}`);
-    }
-  }),
-  limits: {
-    fileSize: 100 * 1024 * 1024
-  }
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 } // 20MB
 });
-
 
 const SALT_ROUNDS = 10;
 const ALLOWED_TYPES = ["UNIVERSITY", "ORGANIZER"];
@@ -65,20 +50,10 @@ db.getConnection((err, connection) => {
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY,
-    secretAccessKey: process.env.AWS_SECRET_KEY
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
   }
 });
-
-// =========================
-// CREATE TEMP UPLOAD FOLDER
-// =========================
-
-const uploadDir = path.join(os.tmpdir(), "uploads");
-
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
 
 // ========== JWT MIDDLEWARE ==========
 function verifyToken(req, res, next) {
@@ -146,21 +121,25 @@ function verifyToken(req, res, next) {
 }
 
 // ================= S3 UPLOAD HELPER =================
-async function uploadToS3(file, folder) {
+const uploadToS3 = async (file, folder) => {
+  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowed.includes(file.mimetype)) {
+    throw new Error('Invalid file type');
+  }
 
-  const key = `${folder}/${Date.now()}-${file.originalname}`;
+  const key = `${folder}/${Date.now()}-${uuidv4()}-${file.originalname.replace(/\s+/g, '_')}`;
 
   const command = new PutObjectCommand({
     Bucket: process.env.AWS_S3_BUCKET_NAME,
     Key: key,
-    Body: fs.createReadStream(file.path),
+    Body: file.buffer,
     ContentType: file.mimetype
   });
 
   await s3.send(command);
 
-  return `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
-}
+  return `https://${process.env.AWS_S3_BUCKET_NAME}.s3.amazonaws.com/${key}`;
+};
 
 
 // ========== AUTHENTICATION ENDPOINTS ==========
@@ -1420,9 +1399,9 @@ app.post(
   "/createport",
   verifyToken,
   upload.fields([
-    { name: "profile", maxCount: 1 },
-    { name: "transcript", maxCount: 1 },
-    { name: "certificate", maxCount: 20 }
+    { name: 'profile', maxCount: 1 },
+    { name: 'transcript', maxCount: 1 },
+    { name: 'certificate', maxCount: 20 }
   ]),
   async (req, res) => {
 
@@ -1431,9 +1410,9 @@ app.post(
     try {
       await connection.beginTransaction();
 
+      // Parse JSON
       let parsedBody = req.body;
-
-      if (typeof req.body.data === "string") {
+      if (typeof req.body.data === 'string') {
         parsedBody = JSON.parse(req.body.data);
       }
 
@@ -1448,34 +1427,30 @@ app.post(
       } = parsedBody;
 
       if (!user_id || !port_id) {
-        return res.status(400).json({
-          success: false,
-          message: "user_id และ port_id จำเป็นต้องมี"
-        });
+        return res.status(400).json({ success: false, message: "user_id และ port_id จำเป็นต้องมี" });
       }
 
       // ================= Upload Files =================
 
       let profileUrl = null;
       if (req.files?.profile?.[0]) {
-        profileUrl = await uploadToS3(req.files.profile[0], "profile-port");
+        profileUrl = await uploadToS3(req.files.profile[0], 'profile-port');
       }
 
       let transcriptUrl = null;
       if (req.files?.transcript?.[0]) {
-        transcriptUrl = await uploadToS3(req.files.transcript[0], "transcript");
+        transcriptUrl = await uploadToS3(req.files.transcript[0], 'Transcript');
       }
 
       let certificateUrls = [];
-
       if (req.files?.certificate?.length) {
         for (const file of req.files.certificate) {
-          const url = await uploadToS3(file, "certificates");
+          const url = await uploadToS3(file, 'certificates');
           certificateUrls.push(url);
         }
       }
 
-      // ================= portfolios =================
+      // ================= Insert portfolios =================
 
       await connection.query(
         `INSERT INTO portfolios (user_id, port_id, profile_url)
@@ -1539,10 +1514,9 @@ app.post(
         }
       }
 
-      // ================= skills =================
+      // ================= skills_abilities =================
 
       if (skills_abilities) {
-
         const [skillRes] = await connection.query(
           `INSERT INTO skills_abilities (port_id, details)
            VALUES (?, ?)`,
@@ -1552,9 +1526,7 @@ app.post(
         const skillsId = skillRes.insertId;
 
         if (Array.isArray(skills_abilities.language_skills)) {
-
           for (const lang of skills_abilities.language_skills) {
-
             await connection.query(
               `INSERT INTO language_skills
                (port_id, skills_abilities_id, language, listening, speaking, reading, writing)
@@ -1570,17 +1542,13 @@ app.post(
               ]
             );
           }
-
         }
-
       }
 
-      // ================= activities =================
+      // ================= activities_certificates (JSON) =================
 
       if (Array.isArray(activities_certificates)) {
-
         for (const activity of activities_certificates) {
-
           await connection.query(
             `INSERT INTO activities_certificates
              (port_id, number, name_project, date, photo, details)
@@ -1594,17 +1562,13 @@ app.post(
               activity.details || null
             ]
           );
-
         }
-
       }
 
-      // ================= university =================
+      // ================= university_choice =================
 
       if (Array.isArray(university_choice)) {
-
         for (const uni of university_choice) {
-
           await connection.query(
             `INSERT INTO university_choice
              (port_id, university, faculty, major, details)
@@ -1617,9 +1581,7 @@ app.post(
               uni.details || null
             ]
           );
-
         }
-
       }
 
       await connection.commit();
@@ -1635,22 +1597,12 @@ app.post(
       });
 
     } catch (err) {
-
       await connection.rollback();
-
       console.error("Create Portfolio Error:", err);
-
-      return res.status(500).json({
-        success: false,
-        error: err.message
-      });
-
+      return res.status(500).json({ success: false, error: err.message });
     } finally {
-
       connection.release();
-
     }
-
   }
 );
 
