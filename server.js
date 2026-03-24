@@ -5,8 +5,8 @@ const mysql = require("mysql2");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
-// const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-// const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const path = require("path");
+const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
@@ -14,11 +14,65 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ================= MULTER =================
+// ================= UPLOAD FOLDERS =================
+const uploadDirs = {
+  profile: path.join(__dirname, 'public/uploads/profile'),
+  transcript: path.join(__dirname, 'public/uploads/transcript'),
+  certificates: path.join(__dirname, 'public/uploads/certificates'),
+  event: path.join(__dirname, 'public/uploads/event')
+};
+
+// สร้างโฟลเดอร์หากยังไม่มี
+Object.values(uploadDirs).forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+// ================= MULTER STORAGE CONFIG =================
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    // กำหนดโฟลเดอร์ตามชื่อ field
+    let uploadDir = uploadDirs.profile; // default
+
+    if (file.fieldname === 'profile') {
+      uploadDir = uploadDirs.profile;
+    } else if (file.fieldname === 'transcript') {
+      uploadDir = uploadDirs.transcript;
+    } else if (file.fieldname === 'certificate') {
+      uploadDir = uploadDirs.certificates;
+    } else if (file.fieldname === 'image') {
+      uploadDir = uploadDirs.event;
+    }
+
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + uuidv4();
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext).replace(/\s+/g, '_');
+    cb(null, `${name}-${uniqueSuffix}${ext}`);
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  const allowedMimes = ['image/jpeg', 'image/png', 'image/webp'];
+  if (allowedMimes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Only JPEG, PNG, WebP allowed'));
+  }
+};
+
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: storage,
+  fileFilter: fileFilter,
   limits: { fileSize: 20 * 1024 * 1024 } // 20MB
 });
+
+// ================= STATIC FILES =================
+// เสิร์ฟไฟล์ static
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
 const SALT_ROUNDS = 10;
 const ALLOWED_TYPES = ["UNIVERSITY", "ORGANIZER"];
@@ -46,27 +100,32 @@ db.getConnection((err, connection) => {
   }
 });
 
-// ========== AWS S3 ==========
-const s3 = new S3Client({
-  region: process.env.AWS_REGION,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+// ========== FILE UPLOAD HELPER (Local Storage) ==========
+const uploadFileLocal = (file, folder) => {
+  if (!file) return null;
+
+  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowed.includes(file.mimetype)) {
+    throw new Error('Invalid file type');
   }
-});
+
+  // ส่งคืน relative path สำหรับเก็บในฐานข้อมูล
+  const relativePath = `/uploads/${folder}/${file.filename}`;
+  return relativePath;
+};
 
 // ========== JWT MIDDLEWARE ==========
 function verifyToken(req, res, next) {
   const auth = req.headers['authorization'] || req.headers['Authorization'];
   console.log('Authorization header:', auth);
-
+  
   if (!auth) {
     return res.status(401).json({ message: 'Invalid token - no Authorization header' });
   }
 
   const parts = auth.trim().split(/\s+/);
   console.log('Authorization parts:', parts);
-
+  
   if (parts.length !== 2 || !/^Bearer$/i.test(parts[0])) {
     return res.status(401).json({ message: 'Invalid token - bad format' });
   }
@@ -119,28 +178,6 @@ function verifyToken(req, res, next) {
     next();
   });
 }
-
-// ================= S3 UPLOAD HELPER =================
-const uploadToS3 = async (file, folder) => {
-  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
-  if (!allowed.includes(file.mimetype)) {
-    throw new Error('Invalid file type');
-  }
-
-  const key = `${folder}/${Date.now()}-${uuidv4()}-${file.originalname.replace(/\s+/g, '_')}`;
-
-  const command = new PutObjectCommand({
-    Bucket: process.env.AWS_S3_BUCKET_NAME,
-    Key: key,
-    Body: file.buffer,
-    ContentType: file.mimetype
-  });
-
-  await s3.send(command);
-
-  return `https://${process.env.AWS_S3_BUCKET_NAME}.s3.amazonaws.com/${key}`;
-};
-
 
 // ========== AUTHENTICATION ENDPOINTS ==========
 
@@ -276,7 +313,7 @@ app.post("/login/organizers", (req, res) => {
     }
 
     const user = rows[0];
-
+    
     if (password !== user.password) {
       return res.status(401).json({ message: "Invalid username or password" });
     }
@@ -888,7 +925,7 @@ app.get("/event/organizer/:organizerId", (req, res) => {
 app.get("/getall/event/:id", (req, res) => {
   const { id } = req.params;
   const sql = "SELECT * FROM event WHERE organizer_id = ?";
-
+  
   db.query(sql, [id], (err, results) => {
     if (err) {
       console.error("Error fetching event:", err);
@@ -902,7 +939,7 @@ app.get("/getall/event/:id", (req, res) => {
 });
 
 // Create event
-app.post("/post/event", verifyToken, (req, res) => {
+app.post("/post/event", verifyToken, upload.single('image'), (req, res) => {
   const {
     organizer_id,
     organizer_name,
@@ -911,7 +948,6 @@ app.post("/post/event", verifyToken, (req, res) => {
     location,
     open_date,
     close_date,
-    image_url,
     contact1,
     contact2,
     status
@@ -923,6 +959,12 @@ app.post("/post/event", verifyToken, (req, res) => {
 
   if (new Date(close_date) <= new Date(open_date)) {
     return res.status(400).json({ message: "Close date must be after open date" });
+  }
+
+  // Handle image upload
+  let image_url = null;
+  if (req.file) {
+    image_url = uploadFileLocal(req.file, 'event');
   }
 
   // Generate ACTxxxxxx
@@ -998,7 +1040,7 @@ app.post("/post/event", verifyToken, (req, res) => {
 });
 
 // Edit event by ID
-app.put("/event/edit/:id", (req, res) => {
+app.put("/event/edit/:id", upload.single('image'), (req, res) => {
   const { id } = req.params;
   const {
     activity_id,
@@ -1008,7 +1050,6 @@ app.put("/event/edit/:id", (req, res) => {
     open_date,
     close_date,
     status,
-    image,
     organizer_id,
     organizer_name
   } = req.body;
@@ -1018,6 +1059,12 @@ app.put("/event/edit/:id", (req, res) => {
       success: false,
       message: "Missing required fields: id, activity_id, title"
     });
+  }
+
+  // Handle new image upload
+  let image = null;
+  if (req.file) {
+    image = uploadFileLocal(req.file, 'event');
   }
 
   const sql = `
@@ -1030,25 +1077,15 @@ app.put("/event/edit/:id", (req, res) => {
       open_date = ?,
       close_date = ?,
       status = ?,
-      image = ?,
+      ${image ? 'image_url = ?,' : ''}
       organizer_id = ?,
       organizer_name = ?
     WHERE id = ?
   `;
 
-  const params = [
-    activity_id,
-    title,
-    description || null,
-    location || null,
-    open_date || null,
-    close_date || null,
-    status || null,
-    image || null,
-    organizer_id || null,
-    organizer_name || null,
-    id
-  ];
+  const params = image 
+    ? [activity_id, title, description || null, location || null, open_date || null, close_date || null, status || null, image, organizer_id || null, organizer_name || null, id]
+    : [activity_id, title, description || null, location || null, open_date || null, close_date || null, status || null, organizer_id || null, organizer_name || null, id];
 
   db.query(sql, params, (err, result) => {
     if (err) {
@@ -1434,18 +1471,18 @@ app.post(
 
       let profileUrl = null;
       if (req.files?.profile?.[0]) {
-        profileUrl = await uploadToS3(req.files.profile[0], 'profile-port');
+        profileUrl = uploadFileLocal(req.files.profile[0], 'profile');
       }
 
       let transcriptUrl = null;
       if (req.files?.transcript?.[0]) {
-        transcriptUrl = await uploadToS3(req.files.transcript[0], 'Transcript');
+        transcriptUrl = uploadFileLocal(req.files.transcript[0], 'transcript');
       }
 
       let certificateUrls = [];
       if (req.files?.certificate?.length) {
         for (const file of req.files.certificate) {
-          const url = await uploadToS3(file, 'certificates');
+          const url = uploadFileLocal(file, 'certificates');
           certificateUrls.push(url);
         }
       }
@@ -1766,118 +1803,58 @@ app.get("/getuniversity_choice/:port_id", async (req, res) => {
   }
 });
 
-// ========== S3 ENDPOINTS ==========
+// ========== LOCAL FILE UPLOAD ENDPOINTS ==========
 
-// S3 presigned URL for event photos
-app.post("/s3/presign", verifyToken, async (req, res) => {
-  const { fileName, fileType } = req.body;
-  const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
-
-  if (!allowedTypes.includes(fileType)) {
-    return res.status(400).json({ message: "Invalid file type" });
-  }
-
-  const key = `daily-life-event-photo/${Date.now()}-${fileName}`;
-
-  const command = new PutObjectCommand({
-    Bucket: process.env.AWS_S3_BUCKET_NAME,
-    Key: key,
-    ContentType: fileType
-  });
-
-  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
-
-  res.json({
-    uploadUrl,
-    imageUrl: `https://${process.env.AWS_S3_BUCKET_NAME}.s3.amazonaws.com/${key}`
-  });
-});
-
-// Direct S3 upload for event photos
-app.post('/upload/event-photo', verifyToken, upload.single('image'), (req, res) => {
-  try {
-    // Multer handles the 'no file' and 'disk saving' part
-    if (!req.file) {
-      return res.status(400).json({ message: 'No file uploaded' });
-    }
-
-    const file = req.file;
-
-    // Validate MimeType (though you can also do this inside multer's fileFilter)
-    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!allowed.includes(file.mimetype)) {
-      return res.status(400).json({ message: 'Invalid file type' });
-    }
-
-    // Construct the URL to access the file via browser
-    // Replace 'yourdomain.com' with your actual domain or use req.get('host')
-    const imageUrl = `${req.protocol}://${req.get('host')}/uploads/events/${file.filename}`;
-
-    return res.json({
-      success: true,
-      message: 'File uploaded to cPanel storage',
-      imageUrl: imageUrl
-    });
-
-  } catch (err) {
-    console.error('CPanel upload error:', err);
-    return res.status(500).json({ message: 'Failed to save file', error: err.message });
-  }
-});
-
-// Direct S3 upload for transcript
-app.post('/s3/transcript', verifyToken, upload.single('image'), async (req, res) => {
+// Direct upload for event photos (Local Storage)
+app.post('/upload/event-image', verifyToken, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const file = req.file;
-    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!allowed.includes(file.mimetype)) {
-      return res.status(400).json({ message: 'Invalid file type' });
-    }
-
-    const key = `Transcript/${Date.now()}-${uuidv4()}-${file.originalname.replace(/\s+/g, '_')}`;
-
-    const command = new PutObjectCommand({
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: key,
-      Body: file.buffer,
-      ContentType: file.mimetype
-    });
-
-    await s3.send(command);
-
-    const imageUrl = `https://${process.env.AWS_S3_BUCKET_NAME}.s3.amazonaws.com/${key}`;
+    const imageUrl = uploadFileLocal(req.file, 'event');
     return res.json({ imageUrl });
   } catch (err) {
-    console.error('S3 upload error:', err);
-    return res.status(500).json({ message: 'Failed to upload file', error: err });
+    console.error('Upload error:', err);
+    return res.status(500).json({ message: 'Failed to upload file', error: err.message });
   }
 });
 
-// S3 presigned URL for transcript
-app.post("/s3/presign/transcript", verifyToken, async (req, res) => {
-  const { fileName, fileType } = req.body;
-  const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
+// Direct upload for transcript (Local Storage)
+app.post('/upload/transcript', verifyToken, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-  if (!allowedTypes.includes(fileType)) {
-    return res.status(400).json({ message: "Invalid file type" });
+    const imageUrl = uploadFileLocal(req.file, 'transcript');
+    return res.json({ imageUrl });
+  } catch (err) {
+    console.error('Upload error:', err);
+    return res.status(500).json({ message: 'Failed to upload file', error: err.message });
   }
+});
 
-  const key = `Transcript/${Date.now()}-${fileName}`;
+// Direct upload for profile (Local Storage)
+app.post('/upload/profile', verifyToken, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-  const command = new PutObjectCommand({
-    Bucket: process.env.AWS_S3_BUCKET_NAME,
-    Key: key,
-    ContentType: fileType
-  });
+    const imageUrl = uploadFileLocal(req.file, 'profile');
+    return res.json({ imageUrl });
+  } catch (err) {
+    console.error('Upload error:', err);
+    return res.status(500).json({ message: 'Failed to upload file', error: err.message });
+  }
+});
 
-  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+// Direct upload for certificates (Local Storage)
+app.post('/upload/certificate', verifyToken, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-  res.json({
-    uploadUrl,
-    imageUrl: `https://${process.env.AWS_S3_BUCKET_NAME}.s3.amazonaws.com/${key}`
-  });
+    const imageUrl = uploadFileLocal(req.file, 'certificates');
+    return res.json({ imageUrl });
+  } catch (err) {
+    console.error('Upload error:', err);
+    return res.status(500).json({ message: 'Failed to upload file', error: err.message });
+  }
 });
 
 // ========== ERROR HANDLING ==========
@@ -1898,8 +1875,5 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on port ${PORT}`);
+  console.log(`📁 Upload directory: ${uploadDirs.profile}`);
 });
-
-const multer = require("multer");
-const Client = require("ssh2-sftp-client"); // Add this
-// Remove the @aws-sdk lines if you aren't using S3 anymore
