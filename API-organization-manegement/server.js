@@ -27,7 +27,7 @@ const db = mysql.createConnection({
   password: "Etdit11@pim",
   database: "zemrmpsz_dailylifes",
   port: 3306,
-  ssl: { rejectUnauthorized: false },
+  // ssl: { rejectUnauthorized: false },
   // waitForConnections: true,
   // connectionLimit: 10,
   // queueLimit: 0,
